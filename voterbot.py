@@ -658,11 +658,16 @@ async def handle_capacity_update(update: Update, context: ContextTypes.DEFAULT_T
         
         ADMIN_STATE.pop(user_id, None)
         
+        # Send confirmation message first
+        await update.message.reply_text(f"✅ Capacity updated to {new_max}")
+        
+        # Then show the updated event
         ev = await db.fetchrow("select * from events where id=$1", event_id)
         if ev:
             text = await render_event(event_id)
             is_admin = await is_event_admin(context, ev, user_id)
             
+            # Try to update the original event message if it's a reply
             if update.message.reply_to_message:
                 try:
                     await update.message.reply_to_message.edit_text(
@@ -671,12 +676,20 @@ async def handle_capacity_update(update: Update, context: ContextTypes.DEFAULT_T
                         reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
                     )
                 except Exception:
-                    pass
+                    # If edit fails, send as new message
+                    await update.message.reply_text(
+                        text=text,
+                        parse_mode="Markdown",
+                        reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
+                    )
+            else:
+                # Send updated event as new message
+                await update.message.reply_text(
+                    text=text,
+                    parse_mode="Markdown",
+                    reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
+                )
             
-            await update.message.reply_text(
-                f"✅ Capacity updated to {new_max}",
-                reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
-            )
             logger.info(f"Event {event_id} capacity updated to {new_max} by user {user_id}")
         
     except ValueError:
