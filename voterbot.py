@@ -643,10 +643,9 @@ def run_event_loop(loop):
 if __name__ == '__main__':
     # Initialize bot on startup
     logger.info("Initializing bot...")
-    global bot_event_loop
     
     try:
-        # Create and set event loop
+        # Create and set event loop (bot_event_loop is already module-level)
         bot_event_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(bot_event_loop)
         
