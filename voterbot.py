@@ -46,6 +46,8 @@ flask_app = Flask(__name__)
 
 # Telegram bot application (initialized on startup)
 telegram_app: Application | None = None
+# Event loop for async operations (shared across threads)
+bot_event_loop: asyncio.AbstractEventLoop | None = None
 
 db: asyncpg.Pool | None = None
 ADMIN_STATE = {}  # admin_id -> {"event_id": x, "target_user_id": y, "mode": "capacity"}
@@ -549,18 +551,29 @@ def webhook():
             json_data = request.get_json(force=True)
             update = Update.de_json(json_data, telegram_app.bot)
             
-            # Process update asynchronously in a thread with its own event loop
-            def process_update_async():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(telegram_app.process_update(update))
-                finally:
-                    loop.close()
-            
-            thread = threading.Thread(target=process_update_async)
-            thread.daemon = True
-            thread.start()
+            # Process update in the bot's event loop using run_coroutine_threadsafe
+            if bot_event_loop and bot_event_loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    telegram_app.process_update(update),
+                    bot_event_loop
+                )
+                # Don't wait for completion to return quickly to Telegram
+                # Errors will be logged by the application's error handlers
+            else:
+                # Fallback: run in new event loop if main loop not available
+                def process_update_async():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(telegram_app.process_update(update))
+                    except Exception as e:
+                        logger.error(f"Error in async processing: {e}")
+                    finally:
+                        loop.close()
+                
+                thread = threading.Thread(target=process_update_async)
+                thread.daemon = True
+                thread.start()
             
             return "ok", 200
         except Exception as e:
@@ -621,18 +634,37 @@ async def init_telegram_app():
 
 # ---------- MAIN ----------
 
+def run_event_loop(loop):
+    """Run the event loop in a background thread"""
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+
 if __name__ == '__main__':
     # Initialize bot on startup
     logger.info("Initializing bot...")
+    global bot_event_loop
+    
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        loop.run_until_complete(init_telegram_app())
+        # Create and set event loop
+        bot_event_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(bot_event_loop)
+        
+        # Initialize bot in the event loop
+        bot_event_loop.run_until_complete(init_telegram_app())
         logger.info("Bot initialized successfully")
+        
+        # Start event loop in background thread
+        loop_thread = threading.Thread(target=run_event_loop, args=(bot_event_loop,), daemon=True)
+        loop_thread.start()
+        logger.info("Event loop running in background thread")
+        
     except Exception as e:
         logger.error(f"Failed to initialize bot: {e}")
+        logger.error("Please check:")
+        logger.error("1. DATABASE_URL is set correctly")
+        logger.error("2. Supabase connection string format: postgresql://postgres:[PASSWORD]@db.[PROJECT].supabase.co:5432/postgres")
+        logger.error("3. For connection pooler: postgresql://postgres.[PROJECT]:[PASSWORD]@aws-0-[REGION].pooler.supabase.com:6543/postgres")
         sys.exit(1)
     
     # Run Flask app
