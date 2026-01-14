@@ -58,10 +58,29 @@ async def init_db():
     try:
         # Use Supabase connection pooler port (6543) for better performance with webhooks
         # Or use direct connection (5432) - both work
-        db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
-        logger.info("Database connection pool created")
+        # Supabase requires SSL - add it if not in connection string
+        pool_kwargs = {
+            'min_size': 1,
+            'max_size': 5,
+        }
+        
+        # Add SSL if connection string doesn't already include it
+        if 'sslmode' not in DATABASE_URL.lower() and 'ssl=' not in DATABASE_URL.lower():
+            pool_kwargs['ssl'] = 'require'
+        
+        db = await asyncpg.create_pool(DATABASE_URL, **pool_kwargs)
+        
+        # Test the connection
+        async with db.acquire() as conn:
+            await conn.fetchval('SELECT 1')
+        logger.info("Database connection pool created and tested")
     except Exception as e:
         logger.error(f"Failed to create database pool: {e}")
+        logger.error("Please check:")
+        logger.error("1. DATABASE_URL is set correctly in environment variables")
+        logger.error("2. Connection string format: postgresql://postgres:[PASSWORD]@db.[PROJECT].supabase.co:5432/postgres")
+        logger.error("3. For pooler: postgresql://postgres.[PROJECT]:[PASSWORD]@aws-0-[REGION].pooler.supabase.com:6543/postgres")
+        logger.error("4. Make sure Supabase allows connections from Render's IP addresses")
         raise
 
 
@@ -625,14 +644,19 @@ if __name__ == '__main__':
     # Initialize bot on startup
     logger.info("Initializing bot...")
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        # Use asyncio.run() for Python 3.7+ (avoids deprecation warning)
+        # Create new event loop for initialization
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         loop.run_until_complete(init_telegram_app())
+        loop.close()
         logger.info("Bot initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize bot: {e}")
+        logger.error("Please check:")
+        logger.error("1. DATABASE_URL is set correctly")
+        logger.error("2. Supabase connection string format: postgresql://postgres:[PASSWORD]@db.[PROJECT].supabase.co:5432/postgres")
+        logger.error("3. For connection pooler: postgresql://postgres.[PROJECT]:[PASSWORD]@aws-0-[REGION].pooler.supabase.com:6543/postgres")
         sys.exit(1)
     
     # Run Flask app
