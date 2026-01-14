@@ -60,8 +60,26 @@ async def init_db():
     try:
         # Use Supabase connection pooler port (6543) for better performance with webhooks
         # Or use direct connection (5432) - both work
-        db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
-        logger.info("Database connection pool created")
+        # IMPORTANT: Disable prepared statements for pgbouncer (Supabase connection pooler)
+        # pgbouncer in transaction/statement mode doesn't support prepared statements
+        pool_kwargs = {
+            'min_size': 1,
+            'max_size': 5,
+            'statement_cache_size': 0,  # Disable prepared statements for pgbouncer compatibility
+        }
+        
+        # Add SSL if connection string doesn't already include it
+        if 'sslmode' not in DATABASE_URL.lower() and 'ssl=' not in DATABASE_URL.lower():
+            pool_kwargs['ssl'] = 'require'
+        
+        logger.info("Creating database connection pool (prepared statements disabled for pgbouncer)...")
+        db = await asyncpg.create_pool(DATABASE_URL, **pool_kwargs)
+        
+        # Test the connection
+        async with db.acquire() as conn:
+            await conn.fetchval('SELECT 1')
+        
+        logger.info("Database connection pool created and tested")
     except Exception as e:
         logger.error(f"Failed to create database pool: {e}")
         raise
