@@ -298,6 +298,19 @@ async def list_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error listing events. Please try again.")
 
 
+async def cancel_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel any ongoing admin action"""
+    user_id = update.message.from_user.id
+    state = ADMIN_STATE.get(user_id)
+    
+    if not state:
+        await update.message.reply_text("ℹ️ No active action to cancel.")
+        return
+    
+    ADMIN_STATE.pop(user_id, None)
+    await update.message.reply_text("❌ Cancelled.")
+
+
 async def show_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show a specific event by ID with management options"""
     try:
@@ -418,31 +431,7 @@ async def admin_manage(update, context, event_id):
         )
 
         if not votes:
-            # No votes yet - offer to add users from the group
-            ev = await db.fetchrow("select * from events where id=$1", event_id)
-            if not ev:
-                await safe_answer_callback(q, "❌ Event not found", show_alert=True)
-                return
-            
-            # Try to get group members (only works in groups)
-            try:
-                # Get chat members (limited to recent active members we can see)
-                # Note: Telegram API doesn't provide full member list, so we'll show an option to add manually
-                buttons = [
-                    [InlineKeyboardButton("➕ Add User Manually", callback_data=f"a:{event_id}:adduser")],
-                    [InlineKeyboardButton("❌ Cancel", callback_data="au:cancel")],
-                ]
-                await q.edit_message_text(
-                    "No votes yet.\n\n"
-                    "You can:\n"
-                    "• Ask users to vote using the buttons\n"
-                    "• Add users manually (coming soon)\n\n"
-                    "Or wait for users to vote first.",
-                    reply_markup=InlineKeyboardMarkup(buttons),
-                )
-            except Exception as e:
-                logger.error(f"Error showing add user option: {e}")
-                await safe_answer_callback(q, "No votes to manage yet. Ask users to vote first.", show_alert=True)
+            await safe_answer_callback(q, "No votes to manage yet. Ask users to vote using the buttons first.", show_alert=True)
             return
 
         buttons = [
@@ -490,18 +479,6 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if action == "manage":
                 logger.info(f"Processing manage action for event {event_id}")
                 await admin_manage(update, context, event_id)
-
-            elif action == "adduser":
-                # Placeholder for future: add user manually
-                await safe_answer_callback(q, "Manual user addition coming soon. Ask users to vote using the buttons.", show_alert=True)
-                # Refresh the event view
-                text = await render_event(event_id)
-                is_admin = await is_event_admin(context, ev, q.from_user.id)
-                await q.edit_message_text(
-                    text=text,
-                    parse_mode="Markdown",
-                    reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
-                )
 
             elif action == "close":
                 await db.execute("update events set active=false where id=$1", event_id)
@@ -637,16 +614,23 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle admin replies for capacity updates"""
+    """Handle admin replies for capacity updates and adding users"""
     user_id = update.message.from_user.id
     state = ADMIN_STATE.get(user_id)
     
     if not state:
         return
     
-    if state.get("mode") != "capacity":
-        return
+    mode = state.get("mode")
     
+    # Handle capacity updates
+    if mode == "capacity":
+        await handle_capacity_update(update, context, state, user_id)
+        return
+
+
+async def handle_capacity_update(update: Update, context: ContextTypes.DEFAULT_TYPE, state: dict, user_id: int):
+    """Handle capacity update replies"""
     try:
         event_id = state["event_id"]
         new_max = int(update.message.text.strip())
@@ -701,6 +685,9 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error(f"Error updating capacity: {e}")
         ADMIN_STATE.pop(user_id, None)
         await update.message.reply_text("❌ Error updating capacity. Please try again.")
+
+
+# Removed handle_add_user function - users can only be added via voting buttons
 
 
 # ---------- INLINE ----------
@@ -825,6 +812,7 @@ async def init_telegram_app():
     telegram_app.add_handler(CommandHandler("list", list_events))
     telegram_app.add_handler(CommandHandler("events", list_events))  # Alias for /list
     telegram_app.add_handler(CommandHandler("show", show_event))
+    telegram_app.add_handler(CommandHandler("cancel", cancel_admin_action))
     telegram_app.add_handler(CallbackQueryHandler(on_vote, pattern="^v:"))
     telegram_app.add_handler(CallbackQueryHandler(on_admin, pattern="^(a:|au:|av:)"))
     telegram_app.add_handler(InlineQueryHandler(inline_events))
