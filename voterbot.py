@@ -418,7 +418,31 @@ async def admin_manage(update, context, event_id):
         )
 
         if not votes:
-            await safe_answer_callback(q, "No votes to manage", show_alert=True)
+            # No votes yet - offer to add users from the group
+            ev = await db.fetchrow("select * from events where id=$1", event_id)
+            if not ev:
+                await safe_answer_callback(q, "❌ Event not found", show_alert=True)
+                return
+            
+            # Try to get group members (only works in groups)
+            try:
+                # Get chat members (limited to recent active members we can see)
+                # Note: Telegram API doesn't provide full member list, so we'll show an option to add manually
+                buttons = [
+                    [InlineKeyboardButton("➕ Add User Manually", callback_data=f"a:{event_id}:adduser")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="au:cancel")],
+                ]
+                await q.edit_message_text(
+                    "No votes yet.\n\n"
+                    "You can:\n"
+                    "• Ask users to vote using the buttons\n"
+                    "• Add users manually (coming soon)\n\n"
+                    "Or wait for users to vote first.",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+            except Exception as e:
+                logger.error(f"Error showing add user option: {e}")
+                await safe_answer_callback(q, "No votes to manage yet. Ask users to vote first.", show_alert=True)
             return
 
         buttons = [
@@ -467,6 +491,18 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.info(f"Processing manage action for event {event_id}")
                 await admin_manage(update, context, event_id)
 
+            elif action == "adduser":
+                # Placeholder for future: add user manually
+                await safe_answer_callback(q, "Manual user addition coming soon. Ask users to vote using the buttons.", show_alert=True)
+                # Refresh the event view
+                text = await render_event(event_id)
+                is_admin = await is_event_admin(context, ev, q.from_user.id)
+                await q.edit_message_text(
+                    text=text,
+                    parse_mode="Markdown",
+                    reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
+                )
+
             elif action == "close":
                 await db.execute("update events set active=false where id=$1", event_id)
                 text = await render_event(event_id)
@@ -502,11 +538,34 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await safe_answer_callback(q, "❌ Could not send message. Please try again.", show_alert=True)
 
         elif prefix == "au":
-            _, event_id, user_id = data
-            if user_id == "cancel":
-                await q.message.delete()
+            # Handle cancel button (data format: "au:cancel")
+            if len(data) == 2 and data[1] == "cancel":
+                try:
+                    await q.message.delete()
+                except Exception:
+                    # If delete fails, just edit the message back
+                    try:
+                        ev = await db.fetchrow("select * from events where id=$1", ADMIN_STATE.get(q.from_user.id, {}).get("event_id"))
+                        if ev:
+                            text = await render_event(ev["id"])
+                            is_admin = await is_event_admin(context, ev, q.from_user.id)
+                            await q.edit_message_text(
+                                text=text,
+                                parse_mode="Markdown",
+                                reply_markup=vote_keyboard(ev["id"], is_admin, ev["active"]),
+                            )
+                    except Exception:
+                        pass
                 ADMIN_STATE.pop(q.from_user.id, None)
                 return
+            
+            # Handle user selection (data format: "au:event_id:user_id")
+            if len(data) != 3:
+                logger.error(f"Invalid au callback data format: {data}")
+                await safe_answer_callback(q, "❌ Invalid action", show_alert=True)
+                return
+            
+            _, event_id, user_id = data
 
             ADMIN_STATE[q.from_user.id] = {
                 "event_id": int(event_id),
