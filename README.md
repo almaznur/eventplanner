@@ -20,6 +20,18 @@ Create a new event with a maximum capacity.
 - `/create Birthday Party | 20`
 - `/create Team Meeting | 10`
 
+### `/list` or `/events`
+List all events in the current chat.
+
+Shows:
+- Event title and ID
+- Current attendance count vs. capacity
+- Active/Closed status
+
+**Example:**
+- `/list`
+- `/events`
+
 ## Voting
 
 After creating an event, use the inline buttons to vote:

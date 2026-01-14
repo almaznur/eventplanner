@@ -231,6 +231,62 @@ async def create_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Failed to create event. Please try again.")
 
 
+async def list_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all events, optionally filtered by chat"""
+    try:
+        # Get events for the current chat, or all events if in private chat
+        chat_id = update.message.chat.id
+        
+        events = await db.fetch(
+            """
+            select e.*, 
+                   coalesce(sum(1 + v.guests), 0) as current_count
+            from events e
+            left join votes v on e.id = v.event_id
+            where e.chat_id = $1
+            group by e.id
+            order by e.created_at desc
+            limit 50
+            """,
+            chat_id
+        )
+        
+        if not events:
+            await update.message.reply_text("📭 No events found in this chat.\n\nCreate one with:\n/create Event Name | Max People")
+            return
+        
+        lines = ["📋 *Events in this chat:*\n"]
+        
+        for ev in events:
+            status = "🟢" if ev["active"] else "🔴"
+            lines.append(
+                f"{status} *{ev['title']}* (ID: `{ev['id']}`)\n"
+                f"   👥 {ev['current_count']}/{ev['max_people']} • "
+                f"{'Active' if ev['active'] else 'Closed'}"
+            )
+        
+        text = "\n".join(lines)
+        
+        # Split if message is too long (Telegram limit is 4096 chars)
+        if len(text) > 4000:
+            # Send in chunks
+            chunk = ""
+            for line in lines:
+                if len(chunk + line + "\n") > 4000:
+                    await update.message.reply_text(chunk, parse_mode="Markdown")
+                    chunk = line + "\n"
+                else:
+                    chunk += line + "\n"
+            if chunk:
+                await update.message.reply_text(chunk, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(text, parse_mode="Markdown")
+            
+    except Exception as e:
+        logger.error(f"Error listing events: {e}")
+        await update.message.reply_text("❌ Error listing events. Please try again.")
+
+
 # ---------- VOTING ----------
 
 async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -637,6 +693,8 @@ async def init_telegram_app():
     telegram_app = Application.builder().token(BOT_TOKEN).build()
     
     telegram_app.add_handler(CommandHandler("create", create_event))
+    telegram_app.add_handler(CommandHandler("list", list_events))
+    telegram_app.add_handler(CommandHandler("events", list_events))  # Alias for /list
     telegram_app.add_handler(CallbackQueryHandler(on_vote, pattern="^v:"))
     telegram_app.add_handler(CallbackQueryHandler(on_admin, pattern="^(a:|au:|av:)"))
     telegram_app.add_handler(InlineQueryHandler(inline_events))
