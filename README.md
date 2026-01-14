@@ -32,6 +32,15 @@ Shows:
 - `/list`
 - `/events`
 
+### `/show <event_id>`
+View and manage a specific event by ID.
+
+Shows the event with voting buttons. If you're the event creator or a group admin, you'll also see admin management buttons.
+
+**Example:**
+- `/show 1`
+- `/show 5`
+
 ## Voting
 
 After creating an event, use the inline buttons to vote:

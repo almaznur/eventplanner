@@ -110,6 +110,17 @@ async def is_event_admin(context, event, user_id: int) -> bool:
     return await is_group_admin(context, event["chat_id"], user_id)
 
 
+async def safe_answer_callback(query, text: str = "", show_alert: bool = False):
+    """Safely answer a callback query, handling errors for old/invalid queries"""
+    try:
+        await query.answer(text=text, show_alert=show_alert)
+    except Exception as e:
+        # Don't log BadRequest for old queries - this is expected behavior
+        if "too old" not in str(e).lower() and "invalid" not in str(e).lower():
+            logger.warning(f"Error answering callback query: {e}")
+        # Silently ignore - query might be too old or already answered
+
+
 # ---------- UI ----------
 
 def vote_keyboard(event_id: int, is_admin: bool, is_active: bool):
@@ -287,11 +298,47 @@ async def list_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error listing events. Please try again.")
 
 
+async def show_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show a specific event by ID with management options"""
+    try:
+        if not context.args or len(context.args) == 0:
+            await update.message.reply_text(
+                "Usage: /show <event_id>\n"
+                "Example: /show 1\n\n"
+                "Use /list to see all event IDs."
+            )
+            return
+        
+        event_id = int(context.args[0])
+        
+        ev = await db.fetchrow("select * from events where id=$1", event_id)
+        if not ev:
+            await update.message.reply_text(f"❌ Event with ID {event_id} not found.")
+            return
+        
+        # Check if user is admin (creator or group admin)
+        is_admin = await is_event_admin(context, ev, update.message.from_user.id)
+        
+        text = await render_event(event_id)
+        
+        await update.message.reply_text(
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
+        )
+        
+    except ValueError:
+        await update.message.reply_text("❌ Event ID must be a number.\nUsage: /show <event_id>")
+    except Exception as e:
+        logger.error(f"Error showing event: {e}")
+        await update.message.reply_text("❌ Error showing event. Please try again.")
+
+
 # ---------- VOTING ----------
 
 async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    await q.answer()
+    await safe_answer_callback(q)
 
     try:
         _, event_id, value = q.data.split(":")
@@ -300,11 +347,11 @@ async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         ev = await db.fetchrow("select * from events where id=$1", event_id)
         if not ev:
-            await q.answer("❌ Event not found", show_alert=True)
+            await safe_answer_callback(q, "❌ Event not found", show_alert=True)
             return
         
         if not ev["active"]:
-            await q.answer("Voting is closed", show_alert=True)
+            await safe_answer_callback(q, "Voting is closed", show_alert=True)
             return
 
         existing = await db.fetchrow(
@@ -329,7 +376,7 @@ async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
             old_size = 1 + existing["guests"] if existing else 0
 
             if current_total - old_size + new_size > ev["max_people"]:
-                await q.answer("❌ Capacity exceeded", show_alert=True)
+                await safe_answer_callback(q, "❌ Capacity exceeded", show_alert=True)
                 return
 
             await db.execute(
@@ -352,10 +399,10 @@ async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except ValueError as e:
         logger.error(f"Error parsing vote callback: {e}")
-        await q.answer("❌ Invalid vote", show_alert=True)
+        await safe_answer_callback(q, "❌ Invalid vote", show_alert=True)
     except Exception as e:
         logger.error(f"Error processing vote: {e}")
-        await q.answer("❌ Error processing vote", show_alert=True)
+        await safe_answer_callback(q, "❌ Error processing vote", show_alert=True)
 
 
 # ---------- ADMIN ----------
@@ -368,7 +415,7 @@ async def admin_manage(update, context, event_id):
         )
 
         if not votes:
-            await update.callback_query.answer("No votes to manage", show_alert=True)
+            await safe_answer_callback(update.callback_query, "No votes to manage", show_alert=True)
             return
 
         buttons = [
@@ -384,12 +431,12 @@ async def admin_manage(update, context, event_id):
         )
     except Exception as e:
         logger.error(f"Error in admin_manage: {e}")
-        await update.callback_query.answer("❌ Error loading votes", show_alert=True)
+        await safe_answer_callback(update.callback_query, "❌ Error loading votes", show_alert=True)
 
 
 async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    await q.answer()
+    await safe_answer_callback(q)
 
     try:
         data = q.data.split(":")
@@ -401,11 +448,11 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             ev = await db.fetchrow("select * from events where id=$1", event_id)
             if not ev:
-                await q.answer("❌ Event not found", show_alert=True)
+                await safe_answer_callback(q, "❌ Event not found", show_alert=True)
                 return
 
             if not await is_group_admin(context, ev["chat_id"], q.from_user.id):
-                await q.answer("Admins only", show_alert=True)
+                await safe_answer_callback(q, "Admins only", show_alert=True)
                 return
 
             if action == "manage":
@@ -466,7 +513,7 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             admin_id = q.from_user.id
             state = ADMIN_STATE.pop(admin_id, None)
             if not state or "target_user_id" not in state:
-                await q.answer("❌ Session expired", show_alert=True)
+                await safe_answer_callback(q, "❌ Session expired", show_alert=True)
                 return
 
             event_id = state["event_id"]
@@ -475,7 +522,7 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             ev = await db.fetchrow("select * from events where id=$1", event_id)
             if not ev:
-                await q.answer("❌ Event not found", show_alert=True)
+                await safe_answer_callback(q, "❌ Event not found", show_alert=True)
                 return
 
             if value == "out":
@@ -501,10 +548,10 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except ValueError as e:
         logger.error(f"Error parsing admin callback: {e}")
-        await q.answer("❌ Invalid action", show_alert=True)
+        await safe_answer_callback(q, "❌ Invalid action", show_alert=True)
     except Exception as e:
         logger.error(f"Error in admin action: {e}")
-        await q.answer("❌ Error processing action", show_alert=True)
+        await safe_answer_callback(q, "❌ Error processing action", show_alert=True)
 
 
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -695,6 +742,7 @@ async def init_telegram_app():
     telegram_app.add_handler(CommandHandler("create", create_event))
     telegram_app.add_handler(CommandHandler("list", list_events))
     telegram_app.add_handler(CommandHandler("events", list_events))  # Alias for /list
+    telegram_app.add_handler(CommandHandler("show", show_event))
     telegram_app.add_handler(CallbackQueryHandler(on_vote, pattern="^v:"))
     telegram_app.add_handler(CallbackQueryHandler(on_admin, pattern="^(a:|au:|av:)"))
     telegram_app.add_handler(InlineQueryHandler(inline_events))
