@@ -409,13 +409,16 @@ async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_manage(update, context, event_id):
     try:
+        q = update.callback_query
+        logger.info(f"Admin manage called for event {event_id} by user {q.from_user.id}")
+        
         votes = await db.fetch(
             "select user_id, user_name from votes where event_id=$1",
             event_id
         )
 
         if not votes:
-            await safe_answer_callback(update.callback_query, "No votes to manage", show_alert=True)
+            await safe_answer_callback(q, "No votes to manage", show_alert=True)
             return
 
         buttons = [
@@ -425,13 +428,14 @@ async def admin_manage(update, context, event_id):
 
         buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="au:cancel")])
 
-        await update.callback_query.edit_message_text(
+        await q.edit_message_text(
             "Select user to edit:",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
+        logger.info(f"Admin manage menu shown for event {event_id}")
     except Exception as e:
-        logger.error(f"Error in admin_manage: {e}")
-        await safe_answer_callback(update.callback_query, "❌ Error loading votes", show_alert=True)
+        logger.error(f"Error in admin_manage: {e}", exc_info=True)
+        await safe_answer_callback(update.callback_query, f"❌ Error: {str(e)[:50]}", show_alert=True)
 
 
 async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -441,21 +445,26 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         data = q.data.split(":")
         prefix = data[0]
+        logger.info(f"Admin callback received: prefix={prefix}, data={q.data}")
 
         if prefix == "a":
             _, event_id, action = data
             event_id = int(event_id)
+            logger.info(f"Processing admin action '{action}' for event {event_id}")
 
             ev = await db.fetchrow("select * from events where id=$1", event_id)
             if not ev:
                 await safe_answer_callback(q, "❌ Event not found", show_alert=True)
                 return
 
-            if not await is_group_admin(context, ev["chat_id"], q.from_user.id):
+            # Check if user is event creator OR group admin
+            if not await is_event_admin(context, ev, q.from_user.id):
                 await safe_answer_callback(q, "Admins only", show_alert=True)
+                logger.warning(f"User {q.from_user.id} tried to manage event {event_id} but is not admin/creator")
                 return
 
             if action == "manage":
+                logger.info(f"Processing manage action for event {event_id}")
                 await admin_manage(update, context, event_id)
 
             elif action == "close":
@@ -475,8 +484,22 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             elif action == "capacity":
+                logger.info(f"Capacity button pressed for event {event_id} by user {q.from_user.id}")
                 ADMIN_STATE[q.from_user.id] = {"event_id": event_id, "mode": "capacity"}
-                await q.message.reply_text("📝 Reply with new max capacity (must be at least 1):")
+                try:
+                    # Try to reply to the message (works in groups/chats)
+                    await q.message.reply_text("📝 Reply with new max capacity (must be at least 1):")
+                except Exception as e:
+                    # If reply fails (e.g., inline query message), send a new message
+                    logger.warning(f"Could not reply to message, sending new message: {e}")
+                    try:
+                        await context.bot.send_message(
+                            chat_id=q.from_user.id,
+                            text="📝 Reply with new max capacity (must be at least 1):"
+                        )
+                    except Exception as e2:
+                        logger.error(f"Could not send message to user: {e2}")
+                        await safe_answer_callback(q, "❌ Could not send message. Please try again.", show_alert=True)
 
         elif prefix == "au":
             _, event_id, user_id = data
