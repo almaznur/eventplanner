@@ -708,33 +708,74 @@ async def handle_capacity_update(update: Update, context: ContextTypes.DEFAULT_T
 async def inline_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
     iq = update.inline_query
     q = iq.query.strip()
+    
+    logger.info(f"Inline query received: '{q}' from user {iq.from_user.id} in chat {iq.chat_type}")
 
     try:
         if q.isdigit():
-            events = await db.fetch("select * from events where id=$1", int(q))
-        else:
+            # Search by event ID
+            event_id = int(q)
+            logger.info(f"Searching for event ID: {event_id}")
+            events = await db.fetch("select * from events where id=$1", event_id)
+        elif q.lower() in ['events', 'list', '']:
+            # Show recent active events (all chats - for sharing across chats)
+            logger.info("Showing recent active events")
             events = await db.fetch(
                 "select * from events where active=true order by created_at desc limit 10"
             )
+        else:
+            # Search by title (partial match)
+            logger.info(f"Searching events by title: {q}")
+            events = await db.fetch(
+                """
+                select * from events 
+                where active=true 
+                and lower(title) like lower($1)
+                order by created_at desc 
+                limit 10
+                """,
+                f"%{q}%"
+            )
 
+        logger.info(f"Found {len(events)} events for inline query")
+        
         results = []
         for ev in events:
-            text = await render_event(ev["id"])
+            try:
+                text = await render_event(ev["id"])
+                results.append(
+                    InlineQueryResultArticle(
+                        id=str(ev["id"]),  # Use event ID as result ID for consistency
+                        title=ev["title"],
+                        description=f"Event #{ev['id']} • {ev['chat_id']}",
+                        input_message_content=InputTextMessageContent(
+                            message_text=text, parse_mode="Markdown"
+                        ),
+                        reply_markup=vote_keyboard(ev["id"], False, ev["active"]),
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Error rendering event {ev['id']} for inline query: {e}")
+                continue
+
+        if not results:
+            # Show a helpful message if no results
             results.append(
                 InlineQueryResultArticle(
-                    id=str(uuid.uuid4()),
-                    title=ev["title"],
-                    description=f"Event #{ev['id']}",
+                    id="no_results",
+                    title="No events found",
+                    description="Try searching by event ID or create a new event",
                     input_message_content=InputTextMessageContent(
-                        text=text, parse_mode="Markdown"
+                        message_text="❌ No events found.\n\nUse /create to make a new event.",
+                        parse_mode="Markdown"
                     ),
-                    reply_markup=vote_keyboard(ev["id"], False, ev["active"]),
                 )
             )
 
+        logger.info(f"Answering inline query with {len(results)} results")
         await iq.answer(results, cache_time=1, is_personal=True)
     except Exception as e:
-        logger.error(f"Error in inline query: {e}")
+        logger.error(f"Error in inline query: {e}", exc_info=True)
         await iq.answer([])
 
 
@@ -753,6 +794,14 @@ def webhook():
         try:
             json_data = request.get_json(force=True)
             update = Update.de_json(json_data, telegram_app.bot)
+            
+            # Log update type for debugging
+            if update.inline_query:
+                logger.info(f"Webhook received: Inline query from user {update.inline_query.from_user.id}")
+            elif update.message:
+                logger.debug(f"Webhook received: Message from user {update.message.from_user.id}")
+            elif update.callback_query:
+                logger.debug(f"Webhook received: Callback query from user {update.callback_query.from_user.id}")
             
             # Process update in the bot's event loop using run_coroutine_threadsafe
             if bot_event_loop and bot_event_loop.is_running():
@@ -780,7 +829,7 @@ def webhook():
             
             return "ok", 200
         except Exception as e:
-            logger.error(f"Error processing webhook: {e}")
+            logger.error(f"Error processing webhook: {e}", exc_info=True)
             return jsonify({"error": str(e)}), 500
     return jsonify({"error": "Method not allowed"}), 405
 
