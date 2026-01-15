@@ -542,6 +542,12 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if action == "manage":
                 logger.info(f"Processing manage action for event {event_id}")
+                # Store original message info for later updates
+                ADMIN_STATE[q.from_user.id] = {
+                    "event_id": event_id,
+                    "original_chat_id": q.message.chat.id,
+                    "original_message_id": q.message.message_id
+                }
                 await admin_manage(update, context, event_id)
 
             elif action == "close":
@@ -549,11 +555,31 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = await render_event(event_id)
                 # Check if event creator is a group admin (same logic as vote updates)
                 is_admin = await should_show_admin_buttons(context, ev)
-                await q.edit_message_text(
-                    text=text,
-                    parse_mode="Markdown",
-                    reply_markup=vote_keyboard(event_id, is_admin, False),
-                )
+                
+                # Update the original event message in the group
+                original_chat_id = q.message.chat.id
+                original_message_id = q.message.message_id
+                
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=original_chat_id,
+                        message_id=original_message_id,
+                        text=text,
+                        parse_mode="Markdown",
+                        reply_markup=vote_keyboard(event_id, is_admin, False),
+                    )
+                    logger.info(f"Event {event_id} closed and message updated in group {original_chat_id}")
+                except Exception as e:
+                    logger.error(f"Could not update event message in group: {e}")
+                    # Fallback: try to edit the callback message
+                    try:
+                        await q.edit_message_text(
+                            text=text,
+                            parse_mode="Markdown",
+                            reply_markup=vote_keyboard(event_id, is_admin, False),
+                        )
+                    except Exception as e2:
+                        logger.error(f"Could not edit message: {e2}")
 
             elif action == "delete":
                 await db.execute("delete from events where id=$1", event_id)
@@ -563,21 +589,23 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             elif action == "capacity":
                 logger.info(f"Capacity button pressed for event {event_id} by user {q.from_user.id}")
-                ADMIN_STATE[q.from_user.id] = {"event_id": event_id, "mode": "capacity"}
+                # Store original message info so we can update it in the group after capacity change
+                ADMIN_STATE[q.from_user.id] = {
+                    "event_id": event_id,
+                    "mode": "capacity",
+                    "original_chat_id": q.message.chat.id,
+                    "original_message_id": q.message.message_id
+                }
                 try:
-                    # Try to reply to the message (works in groups/chats)
-                    await q.message.reply_text("📝 Reply with new max capacity (must be at least 1):")
+                    # Send private message to admin
+                    await context.bot.send_message(
+                        chat_id=q.from_user.id,
+                        text="📝 Reply with new max capacity (must be at least 1):"
+                    )
+                    await safe_answer_callback(q, "Check your private messages", show_alert=False)
                 except Exception as e:
-                    # If reply fails (e.g., inline query message), send a new message
-                    logger.warning(f"Could not reply to message, sending new message: {e}")
-                    try:
-                        await context.bot.send_message(
-                            chat_id=q.from_user.id,
-                            text="📝 Reply with new max capacity (must be at least 1):"
-                        )
-                    except Exception as e2:
-                        logger.error(f"Could not send message to user: {e2}")
-                        await safe_answer_callback(q, "❌ Could not send message. Please try again.", show_alert=True)
+                    logger.error(f"Could not send message to user: {e}")
+                    await safe_answer_callback(q, "❌ Could not send message. Please try again.", show_alert=True)
 
         elif prefix == "au":
             # Handle cancel button (data format: "au:cancel")
@@ -635,10 +663,13 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.warning(f"User {q.from_user.id} tried to select user in event {event_id} but is not admin")
                 return
             
-            # Store state for vote editing
+            # Store state for vote editing (preserve original message info if it exists)
+            current_state = ADMIN_STATE.get(q.from_user.id, {})
             ADMIN_STATE[q.from_user.id] = {
                 "event_id": event_id,
                 "target_user_id": target_user_id,
+                "original_chat_id": current_state.get("original_chat_id"),
+                "original_message_id": current_state.get("original_message_id")
             }
 
             buttons = [
@@ -712,11 +743,37 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = await render_event(event_id)
             # Check if event creator is a group admin (same logic as vote updates)
             is_admin = await should_show_admin_buttons(context, ev)
-            await q.edit_message_text(
-                text=text,
-                parse_mode="Markdown",
-                reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
-            )
+            
+            # Get original message info from state
+            original_chat_id = state.get("original_chat_id")
+            original_message_id = state.get("original_message_id")
+            
+            # Update the private message (where admin is working)
+            try:
+                await q.edit_message_text(
+                    text=text,
+                    parse_mode="Markdown",
+                    reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
+                )
+            except Exception as e:
+                logger.error(f"Could not edit private message: {e}")
+            
+            # Also update the original event message in the group
+            if original_chat_id and original_message_id:
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=original_chat_id,
+                        message_id=original_message_id,
+                        text=text,
+                        parse_mode="Markdown",
+                        reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
+                    )
+                    logger.info(f"Updated event message in group {original_chat_id} after vote edit for event {event_id}")
+                except Exception as e:
+                    logger.error(f"Could not update event message in group: {e}")
+            
+            # Clean up state
+            ADMIN_STATE.pop(admin_id, None)
             logger.info(f"Admin {admin_id} edited vote for user {target_user_id} in event {event_id}")
 
     except ValueError as e:
@@ -774,40 +831,46 @@ async def handle_capacity_update(update: Update, context: ContextTypes.DEFAULT_T
             new_max, event_id
         )
         
+        # Get original message info before popping state
+        original_chat_id = state.get("original_chat_id")
+        original_message_id = state.get("original_message_id")
+        
         ADMIN_STATE.pop(user_id, None)
         
-        # Send confirmation message first
+        # Send confirmation message to admin in private chat
         await update.message.reply_text(f"✅ Capacity updated to {new_max}")
         
-        # Then show the updated event
+        # Update the original event message in the group chat
         ev = await db.fetchrow("select * from events where id=$1", event_id)
         if ev:
             text = await render_event(event_id)
             # Check if event creator is a group admin (same logic as vote updates)
             is_admin = await should_show_admin_buttons(context, ev)
             
-            # Try to update the original event message if it's a reply
-            if update.message.reply_to_message:
+            # Update the original event message in the group
+            if original_chat_id and original_message_id:
                 try:
-                    await update.message.reply_to_message.edit_text(
+                    await context.bot.edit_message_text(
+                        chat_id=original_chat_id,
+                        message_id=original_message_id,
                         text=text,
                         parse_mode="Markdown",
                         reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
                     )
-                except Exception:
-                    # If edit fails, send as new message
-                    await update.message.reply_text(
-                        text=text,
-                        parse_mode="Markdown",
-                        reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
-                    )
-            else:
-                # Send updated event as new message
-                await update.message.reply_text(
-                    text=text,
-                    parse_mode="Markdown",
-                    reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
-                )
+                    logger.info(f"Updated event message in group {original_chat_id} for event {event_id}")
+                except Exception as e:
+                    logger.error(f"Could not update event message in group: {e}")
+                    # If update fails, send a new message to the group
+                    try:
+                        await context.bot.send_message(
+                            chat_id=original_chat_id,
+                            text=text,
+                            parse_mode="Markdown",
+                            reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
+                        )
+                        logger.info(f"Sent new event message to group {original_chat_id} for event {event_id}")
+                    except Exception as e2:
+                        logger.error(f"Could not send message to group either: {e2}")
             
             logger.info(f"Event {event_id} capacity updated to {new_max} by user {user_id}")
         
