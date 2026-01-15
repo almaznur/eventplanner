@@ -95,9 +95,11 @@ async def close_db():
 # ---------- HELPERS ----------
 
 async def is_group_admin(context, chat_id: int, user_id: int) -> bool:
+    """Check if user is a group administrator or owner/creator"""
     try:
         member = await context.bot.get_chat_member(chat_id, user_id)
-        return member.status in ("administrator", "creator")
+        # Check for administrator, creator, or owner status
+        return member.status in ("administrator", "creator", "owner")
     except Exception as e:
         logger.error(f"Error checking admin status: {e}")
         return False
@@ -129,10 +131,10 @@ def vote_keyboard(event_id: int, is_admin: bool, is_active: bool):
     if is_active:
         rows.append([InlineKeyboardButton("✅ IN", callback_data=f"v:{event_id}:0")])
         rows.append([
-            InlineKeyboardButton("👤 + 👤 +1", callback_data=f"v:{event_id}:1"),
-            InlineKeyboardButton("👤 + 👤👤 +2", callback_data=f"v:{event_id}:2"),
-            InlineKeyboardButton("👤 + 👤👤👤 +3", callback_data=f"v:{event_id}:3"),
-            InlineKeyboardButton("👤 + 👤👤👤👤 +4", callback_data=f"v:{event_id}:4"),
+            InlineKeyboardButton("👤 +1", callback_data=f"v:{event_id}:1"),
+            InlineKeyboardButton("👤 +2", callback_data=f"v:{event_id}:2"),
+            InlineKeyboardButton("👤 +3", callback_data=f"v:{event_id}:3"),
+            InlineKeyboardButton("👤 +4", callback_data=f"v:{event_id}:4"),
         ])
         rows.append([InlineKeyboardButton("❌ OUT", callback_data=f"v:{event_id}:out")])
 
@@ -230,11 +232,16 @@ async def create_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         event_id = row["id"]
         text = await render_event(event_id)
+        
+        # Check if creator is a group admin to determine if admin buttons should be shown
+        # Note: In Telegram, all users see the same keyboard, so we show buttons
+        # only if the creator is a group admin (who can actually use them)
+        is_admin = await is_group_admin(context, update.message.chat.id, update.message.from_user.id)
 
         await update.message.reply_text(
             text=text,
             parse_mode="Markdown",
-            reply_markup=vote_keyboard(event_id, True, True),
+            reply_markup=vote_keyboard(event_id, is_admin, True),
         )
         logger.info(f"Event created: {event_id} by user {update.message.from_user.id}")
     except Exception as e:
@@ -402,9 +409,11 @@ async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 event_id, user.id, user.full_name, guests
             )
 
-        # Check admin status based on event creator, not the voter
-        # This ensures admin buttons are visible to admins even when non-admins vote
-        is_admin = await is_event_admin(context, ev, ev["created_by"])
+        # Check if event creator is a group admin (not just the creator)
+        # This ensures admin buttons are only visible when appropriate
+        # Note: In Telegram, all users see the same keyboard, so we show buttons
+        # only if the creator is a group admin (who can actually use them)
+        is_admin = await is_group_admin(context, ev["chat_id"], ev["created_by"])
 
         text = await render_event(event_id)
         await q.edit_message_text(
@@ -485,7 +494,8 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif action == "close":
                 await db.execute("update events set active=false where id=$1", event_id)
                 text = await render_event(event_id)
-                is_admin = await is_event_admin(context, ev, q.from_user.id)
+                # Check if event creator is a group admin (same logic as vote updates)
+                is_admin = await is_group_admin(context, ev["chat_id"], ev["created_by"])
                 await q.edit_message_text(
                     text=text,
                     parse_mode="Markdown",
@@ -527,7 +537,8 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         ev = await db.fetchrow("select * from events where id=$1", ADMIN_STATE.get(q.from_user.id, {}).get("event_id"))
                         if ev:
                             text = await render_event(ev["id"])
-                            is_admin = await is_event_admin(context, ev, q.from_user.id)
+                            # Check if event creator is a group admin (same logic as vote updates)
+                            is_admin = await is_group_admin(context, ev["chat_id"], ev["created_by"])
                             await q.edit_message_text(
                                 text=text,
                                 parse_mode="Markdown",
@@ -555,11 +566,11 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("✅ IN", callback_data="av:0")],
                 [
                     InlineKeyboardButton("👤 +1", callback_data="av:1"),
-                    InlineKeyboardButton("👥 +2", callback_data="av:2"),
+                    InlineKeyboardButton("👤 +2", callback_data="av:2"),
                 ],
                 [
-                    InlineKeyboardButton("👥👤 +3", callback_data="av:3"),
-                    InlineKeyboardButton("👥👥👤 +4", callback_data="av:4"),
+                    InlineKeyboardButton("👤 +3", callback_data="av:3"),
+                    InlineKeyboardButton("👤 +4", callback_data="av:4"),
                 ],
                 [InlineKeyboardButton("❌ OUT", callback_data="av:out")],
                 [InlineKeyboardButton("❌ Cancel", callback_data="au:cancel")],
@@ -599,7 +610,8 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
             text = await render_event(event_id)
-            is_admin = await is_event_admin(context, ev, admin_id)
+            # Check if event creator is a group admin (same logic as vote updates)
+            is_admin = await is_group_admin(context, ev["chat_id"], ev["created_by"])
             await q.edit_message_text(
                 text=text,
                 parse_mode="Markdown",
@@ -671,7 +683,8 @@ async def handle_capacity_update(update: Update, context: ContextTypes.DEFAULT_T
         ev = await db.fetchrow("select * from events where id=$1", event_id)
         if ev:
             text = await render_event(event_id)
-            is_admin = await is_event_admin(context, ev, user_id)
+            # Check if event creator is a group admin (same logic as vote updates)
+            is_admin = await is_group_admin(context, ev["chat_id"], ev["created_by"])
             
             # Try to update the original event message if it's a reply
             if update.message.reply_to_message:
