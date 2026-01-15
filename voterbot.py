@@ -129,10 +129,10 @@ def vote_keyboard(event_id: int, is_admin: bool, is_active: bool):
     if is_active:
         rows.append([InlineKeyboardButton("✅ IN", callback_data=f"v:{event_id}:0")])
         rows.append([
-            InlineKeyboardButton("👤 +1", callback_data=f"v:{event_id}:1"),
-            InlineKeyboardButton("👥 +2", callback_data=f"v:{event_id}:2"),
-            InlineKeyboardButton("👥👤 +3", callback_data=f"v:{event_id}:3"),
-            InlineKeyboardButton("👥👥👤 +4", callback_data=f"v:{event_id}:4"),
+            InlineKeyboardButton("👤 + 👤 +1", callback_data=f"v:{event_id}:1"),
+            InlineKeyboardButton("👤 + 👤👤 +2", callback_data=f"v:{event_id}:2"),
+            InlineKeyboardButton("👤 + 👤👤👤 +3", callback_data=f"v:{event_id}:3"),
+            InlineKeyboardButton("👤 + 👤👤👤👤 +4", callback_data=f"v:{event_id}:4"),
         ])
         rows.append([InlineKeyboardButton("❌ OUT", callback_data=f"v:{event_id}:out")])
 
@@ -402,7 +402,9 @@ async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 event_id, user.id, user.full_name, guests
             )
 
-        is_admin = await is_event_admin(context, ev, user.id)
+        # Check admin status based on event creator, not the voter
+        # This ensures admin buttons are visible to admins even when non-admins vote
+        is_admin = await is_event_admin(context, ev, ev["created_by"])
 
         text = await render_event(event_id)
         await q.edit_message_text(
