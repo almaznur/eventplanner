@@ -617,6 +617,10 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle admin replies for capacity updates and adding users"""
+    # Only process if this is a message update (not a callback query)
+    if not update.message:
+        return
+    
     user_id = update.message.from_user.id
     state = ADMIN_STATE.get(user_id)
     
