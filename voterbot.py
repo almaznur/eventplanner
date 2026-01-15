@@ -463,6 +463,17 @@ async def admin_manage(update, context, event_id):
         q = update.callback_query
         logger.info(f"Admin manage called for event {event_id} by user {q.from_user.id}")
         
+        # Double-check permissions (security)
+        ev = await db.fetchrow("select * from events where id=$1", event_id)
+        if not ev:
+            await safe_answer_callback(q, "❌ Event not found", show_alert=True)
+            return
+        
+        if not await is_event_admin(context, ev, q.from_user.id):
+            await safe_answer_callback(q, "❌ Admins only", show_alert=True)
+            logger.warning(f"User {q.from_user.id} tried to access manage for event {event_id} but is not admin")
+            return
+        
         votes = await db.fetch(
             "select user_id, user_name from votes where event_id=$1",
             event_id
@@ -556,24 +567,45 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif prefix == "au":
             # Handle cancel button (data format: "au:cancel")
             if len(data) == 2 and data[1] == "cancel":
+                await safe_answer_callback(q, "Cancelled")
+                
+                # Get event_id from ADMIN_STATE or try to find it from the message
+                event_id = None
+                state = ADMIN_STATE.get(q.from_user.id, {})
+                if state and "event_id" in state:
+                    event_id = state["event_id"]
+                else:
+                    # Try to extract from callback data if it was stored
+                    # For now, just try to restore the original event message
+                    pass
+                
                 try:
+                    # Try to delete the "Select user to edit" message
                     await q.message.delete()
-                except Exception:
-                    # If delete fails, just edit the message back
-                    try:
-                        ev = await db.fetchrow("select * from events where id=$1", ADMIN_STATE.get(q.from_user.id, {}).get("event_id"))
-                        if ev:
-                            text = await render_event(ev["id"])
-                            # Check if event creator is a group admin (same logic as vote updates)
-                            is_admin = await should_show_admin_buttons(context, ev)
-                            await q.edit_message_text(
-                                text=text,
-                                parse_mode="Markdown",
-                                reply_markup=vote_keyboard(ev["id"], is_admin, ev["active"]),
-                            )
-                    except Exception:
-                        pass
+                except Exception as e:
+                    logger.debug(f"Could not delete message: {e}")
+                    # If delete fails, try to edit it back to the event view
+                    if event_id:
+                        try:
+                            ev = await db.fetchrow("select * from events where id=$1", event_id)
+                            if ev:
+                                text = await render_event(ev["id"])
+                                is_admin = await should_show_admin_buttons(context, ev)
+                                await q.edit_message_text(
+                                    text=text,
+                                    parse_mode="Markdown",
+                                    reply_markup=vote_keyboard(ev["id"], is_admin, ev["active"]),
+                                )
+                        except Exception as e2:
+                            logger.error(f"Error restoring event message: {e2}")
+                            # If all else fails, just edit to a simple message
+                            try:
+                                await q.edit_message_text("❌ Cancelled")
+                            except Exception:
+                                pass
+                
                 ADMIN_STATE.pop(q.from_user.id, None)
+                logger.info(f"Cancel action completed for user {q.from_user.id}")
                 return
             
             # Handle user selection (data format: "au:event_id:user_id")
@@ -582,11 +614,30 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_answer_callback(q, "❌ Invalid action", show_alert=True)
                 return
             
-            _, event_id, user_id = data
-
+            # Extract event_id and check permissions
+            _, event_id_str, user_id_str = data
+            try:
+                event_id = int(event_id_str)
+                target_user_id = int(user_id_str)
+            except ValueError:
+                await safe_answer_callback(q, "❌ Invalid ID format", show_alert=True)
+                return
+            
+            # Check permissions before allowing user selection
+            ev = await db.fetchrow("select * from events where id=$1", event_id)
+            if not ev:
+                await safe_answer_callback(q, "❌ Event not found", show_alert=True)
+                return
+            
+            if not await is_event_admin(context, ev, q.from_user.id):
+                await safe_answer_callback(q, "❌ Admins only", show_alert=True)
+                logger.warning(f"User {q.from_user.id} tried to select user in event {event_id} but is not admin")
+                return
+            
+            # Store state for vote editing
             ADMIN_STATE[q.from_user.id] = {
-                "event_id": int(event_id),
-                "target_user_id": int(user_id),
+                "event_id": event_id,
+                "target_user_id": target_user_id,
             }
 
             buttons = [
@@ -610,7 +661,7 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif prefix == "av":
             admin_id = q.from_user.id
-            state = ADMIN_STATE.pop(admin_id, None)
+            state = ADMIN_STATE.get(admin_id, None)
             if not state or "target_user_id" not in state:
                 await safe_answer_callback(q, "❌ Session expired", show_alert=True)
                 return
@@ -622,6 +673,14 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ev = await db.fetchrow("select * from events where id=$1", event_id)
             if not ev:
                 await safe_answer_callback(q, "❌ Event not found", show_alert=True)
+                ADMIN_STATE.pop(admin_id, None)
+                return
+            
+            # Check permissions before allowing vote editing
+            if not await is_event_admin(context, ev, admin_id):
+                await safe_answer_callback(q, "❌ Admins only", show_alert=True)
+                logger.warning(f"User {admin_id} tried to edit vote in event {event_id} but is not admin")
+                ADMIN_STATE.pop(admin_id, None)
                 return
 
             if value == "out":
