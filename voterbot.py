@@ -110,15 +110,10 @@ async def is_group_admin(context, chat_id: int, user_id: int) -> bool:
 
 async def should_show_admin_buttons(context, event) -> bool:
     """Determine if admin buttons should be shown for an event.
-    Shows buttons if event creator is a group admin, or if chat is private (creator can always manage)."""
+    Shows buttons ONLY if event creator is a group admin, or if chat is private (creator can always manage).
+    This prevents ordinary group members from seeing admin buttons."""
     creator_id = event["created_by"]
     chat_id = event["chat_id"]
-    
-    # Check if creator is a group admin
-    is_admin = await is_group_admin(context, chat_id, creator_id)
-    if is_admin:
-        logger.info(f"Showing admin buttons: creator {creator_id} is a group admin in chat {chat_id}")
-        return True
     
     # Check if it's a private chat (positive chat_id indicates private chat)
     # In private chats, the creator should always be able to manage their events
@@ -126,9 +121,16 @@ async def should_show_admin_buttons(context, event) -> bool:
         # It's a private chat, creator can always manage
         logger.info(f"Showing admin buttons: private chat {chat_id}, creator {creator_id} can manage")
         return True
+    
+    # For groups/supergroups (negative chat_id), only show if creator is a group admin
+    # This is critical - we don't want ordinary members to see admin buttons
+    is_admin = await is_group_admin(context, chat_id, creator_id)
+    if is_admin:
+        logger.info(f"Showing admin buttons: creator {creator_id} is a group admin in group {chat_id}")
+        return True
     else:
-        # It's a group/supergroup (negative chat_id), only show if creator is admin
-        logger.info(f"Not showing admin buttons: creator {creator_id} is not a group admin in group {chat_id}")
+        # Creator is NOT a group admin - don't show buttons to anyone
+        logger.info(f"NOT showing admin buttons: creator {creator_id} is NOT a group admin in group {chat_id} (status check returned False)")
         return False
 
 
@@ -490,10 +492,23 @@ async def admin_manage(update, context, event_id):
 
         buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="au:cancel")])
 
-        await q.edit_message_text(
-            "Select user to edit:",
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
+        # Send private message to admin instead of editing group message
+        # This prevents everyone in the group from seeing the user selection dialog
+        try:
+            await context.bot.send_message(
+                chat_id=q.from_user.id,
+                text=f"Select user to edit for event *{ev['title']}*:",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            await safe_answer_callback(q, "Check your private messages", show_alert=False)
+        except Exception as e:
+            logger.error(f"Error sending private message to admin: {e}")
+            # Fallback: edit the message if private message fails
+            await q.edit_message_text(
+                "Select user to edit:",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
         logger.info(f"Admin manage menu shown for event {event_id}")
     except Exception as e:
         logger.error(f"Error in admin_manage: {e}", exc_info=True)
@@ -569,40 +584,26 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(data) == 2 and data[1] == "cancel":
                 await safe_answer_callback(q, "Cancelled")
                 
-                # Get event_id from ADMIN_STATE or try to find it from the message
+                # Get event_id from ADMIN_STATE
                 event_id = None
                 state = ADMIN_STATE.get(q.from_user.id, {})
                 if state and "event_id" in state:
                     event_id = state["event_id"]
-                else:
-                    # Try to extract from callback data if it was stored
-                    # For now, just try to restore the original event message
-                    pass
                 
                 try:
                     # Try to delete the "Select user to edit" message
+                    # This works for both group messages and private messages
                     await q.message.delete()
+                    logger.info(f"Cancel: deleted user selection message for user {q.from_user.id}")
                 except Exception as e:
                     logger.debug(f"Could not delete message: {e}")
-                    # If delete fails, try to edit it back to the event view
-                    if event_id:
-                        try:
-                            ev = await db.fetchrow("select * from events where id=$1", event_id)
-                            if ev:
-                                text = await render_event(ev["id"])
-                                is_admin = await should_show_admin_buttons(context, ev)
-                                await q.edit_message_text(
-                                    text=text,
-                                    parse_mode="Markdown",
-                                    reply_markup=vote_keyboard(ev["id"], is_admin, ev["active"]),
-                                )
-                        except Exception as e2:
-                            logger.error(f"Error restoring event message: {e2}")
-                            # If all else fails, just edit to a simple message
-                            try:
-                                await q.edit_message_text("❌ Cancelled")
-                            except Exception:
-                                pass
+                    # If delete fails (e.g., message already deleted), try to edit it
+                    try:
+                        await q.edit_message_text("❌ Cancelled")
+                    except Exception as e2:
+                        logger.debug(f"Could not edit message either: {e2}")
+                        # Message might already be deleted or inaccessible - that's okay
+                        pass
                 
                 ADMIN_STATE.pop(q.from_user.id, None)
                 logger.info(f"Cancel action completed for user {q.from_user.id}")
@@ -654,10 +655,23 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("❌ Cancel", callback_data="au:cancel")],
             ]
 
-            await q.edit_message_text(
-                "Choose vote:",
-                reply_markup=InlineKeyboardMarkup(buttons),
-            )
+            # Send private message to admin instead of editing group message
+            # This prevents everyone in the group from seeing the vote selection dialog
+            try:
+                await context.bot.send_message(
+                    chat_id=q.from_user.id,
+                    text=f"Choose vote for *{ev['title']}*:",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+                await safe_answer_callback(q, "Check your private messages", show_alert=False)
+            except Exception as e:
+                logger.error(f"Error sending private message to admin: {e}")
+                # Fallback: edit the message if private message fails
+                await q.edit_message_text(
+                    "Choose vote:",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
 
         elif prefix == "av":
             admin_id = q.from_user.id
