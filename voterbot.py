@@ -99,9 +99,36 @@ async def is_group_admin(context, chat_id: int, user_id: int) -> bool:
     try:
         member = await context.bot.get_chat_member(chat_id, user_id)
         # Check for administrator, creator, or owner status
-        return member.status in ("administrator", "creator", "owner")
+        status = member.status
+        is_admin = status in ("administrator", "creator", "owner")
+        logger.debug(f"User {user_id} in chat {chat_id}: status={status}, is_admin={is_admin}")
+        return is_admin
     except Exception as e:
-        logger.error(f"Error checking admin status: {e}")
+        logger.error(f"Error checking admin status for user {user_id} in chat {chat_id}: {e}")
+        return False
+
+
+async def should_show_admin_buttons(context, event) -> bool:
+    """Determine if admin buttons should be shown for an event.
+    Shows buttons if event creator is a group admin, or if chat is private (creator can always manage)."""
+    creator_id = event["created_by"]
+    chat_id = event["chat_id"]
+    
+    # Check if creator is a group admin
+    is_admin = await is_group_admin(context, chat_id, creator_id)
+    if is_admin:
+        logger.info(f"Showing admin buttons: creator {creator_id} is a group admin in chat {chat_id}")
+        return True
+    
+    # Check if it's a private chat (positive chat_id indicates private chat)
+    # In private chats, the creator should always be able to manage their events
+    if chat_id > 0:
+        # It's a private chat, creator can always manage
+        logger.info(f"Showing admin buttons: private chat {chat_id}, creator {creator_id} can manage")
+        return True
+    else:
+        # It's a group/supergroup (negative chat_id), only show if creator is admin
+        logger.info(f"Not showing admin buttons: creator {creator_id} is not a group admin in group {chat_id}")
         return False
 
 
@@ -233,10 +260,10 @@ async def create_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         event_id = row["id"]
         text = await render_event(event_id)
         
-        # Check if creator is a group admin to determine if admin buttons should be shown
-        # Note: In Telegram, all users see the same keyboard, so we show buttons
-        # only if the creator is a group admin (who can actually use them)
-        is_admin = await is_group_admin(context, update.message.chat.id, update.message.from_user.id)
+        # Determine if admin buttons should be shown
+        # Create a temporary event dict for the helper function
+        temp_event = {"created_by": update.message.from_user.id, "chat_id": update.message.chat.id}
+        is_admin = await should_show_admin_buttons(context, temp_event)
 
         await update.message.reply_text(
             text=text,
@@ -413,7 +440,7 @@ async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # This ensures admin buttons are only visible when appropriate
         # Note: In Telegram, all users see the same keyboard, so we show buttons
         # only if the creator is a group admin (who can actually use them)
-        is_admin = await is_group_admin(context, ev["chat_id"], ev["created_by"])
+        is_admin = await should_show_admin_buttons(context, ev)
 
         text = await render_event(event_id)
         await q.edit_message_text(
@@ -495,7 +522,7 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await db.execute("update events set active=false where id=$1", event_id)
                 text = await render_event(event_id)
                 # Check if event creator is a group admin (same logic as vote updates)
-                is_admin = await is_group_admin(context, ev["chat_id"], ev["created_by"])
+                is_admin = await should_show_admin_buttons(context, ev)
                 await q.edit_message_text(
                     text=text,
                     parse_mode="Markdown",
@@ -538,7 +565,7 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if ev:
                             text = await render_event(ev["id"])
                             # Check if event creator is a group admin (same logic as vote updates)
-                            is_admin = await is_group_admin(context, ev["chat_id"], ev["created_by"])
+                            is_admin = await should_show_admin_buttons(context, ev)
                             await q.edit_message_text(
                                 text=text,
                                 parse_mode="Markdown",
@@ -611,7 +638,7 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             text = await render_event(event_id)
             # Check if event creator is a group admin (same logic as vote updates)
-            is_admin = await is_group_admin(context, ev["chat_id"], ev["created_by"])
+            is_admin = await should_show_admin_buttons(context, ev)
             await q.edit_message_text(
                 text=text,
                 parse_mode="Markdown",
@@ -684,7 +711,7 @@ async def handle_capacity_update(update: Update, context: ContextTypes.DEFAULT_T
         if ev:
             text = await render_event(event_id)
             # Check if event creator is a group admin (same logic as vote updates)
-            is_admin = await is_group_admin(context, ev["chat_id"], ev["created_by"])
+            is_admin = await should_show_admin_buttons(context, ev)
             
             # Try to update the original event message if it's a reply
             if update.message.reply_to_message:
