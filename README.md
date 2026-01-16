@@ -33,9 +33,9 @@ Shows:
 - `/events`
 
 ### `/show <event_id>`
-View and manage a specific event by ID.
+View a specific event by ID.
 
-Shows the event with voting buttons. If you're the event creator or a group admin, you'll also see admin management buttons.
+Shows the event with voting buttons.
 
 **Example:**
 - `/show 1`
@@ -46,9 +46,9 @@ Shows the event with voting buttons. If you're the event creator or a group admi
 After creating an event, use the inline buttons to vote:
 - **✅ IN** - You're attending
 - **👤 +1** - You + 1 guest
-- **👥 +2** - You + 2 guests
-- **👥👤 +3** - You + 3 guests
-- **👥👥👤 +4** - You + 4 guests
+- **👤 +2** - You + 2 guests
+- **👤 +3** - You + 3 guests
+- **👤 +4** - You + 4 guests
 - **❌ OUT** - Remove your vote
 
 ## Inline Queries
@@ -59,11 +59,34 @@ Type `@YourBotName` in any chat:
 
 ## Admin Features
 
-If you're a group admin or event creator, you'll see additional buttons:
-- **🧑‍🤝‍🧑 Manage votes** - Edit individual user votes
-- **⚙️ Capacity** - Change max capacity (reply with new number)
-- **🔒 Close** - Close voting for the event
-- **🗑 Delete** - Delete the event
+If you're a group admin or event creator, use these commands to manage events:
+
+### `/capacity <event_id> [new_capacity]`
+Change the maximum capacity of an event.
+
+**Examples:**
+- `/capacity 1 20` - Set capacity to 20
+- `/capacity 1` - Reply to the bot's message with the new capacity
+
+### `/manage <event_id>`
+Manage individual user votes. Shows a list of users who voted, allowing you to edit their votes.
+
+**Example:**
+- `/manage 1`
+
+### `/close <event_id>`
+Close voting for an event (users can no longer vote).
+
+**Example:**
+- `/close 1`
+
+### `/delete <event_id>`
+Permanently delete an event and all its votes.
+
+**Example:**
+- `/delete 1`
+
+⚠️ **Note:** All admin commands require you to be either the event creator or a group admin.
 
 ## Setup
 

@@ -155,7 +155,8 @@ async def safe_answer_callback(query, text: str = "", show_alert: bool = False):
 
 # ---------- UI ----------
 
-def vote_keyboard(event_id: int, is_admin: bool, is_active: bool):
+def vote_keyboard(event_id: int, is_active: bool):
+    """Create voting keyboard (admin buttons removed - use commands instead)"""
     rows = []
 
     if is_active:
@@ -167,16 +168,6 @@ def vote_keyboard(event_id: int, is_admin: bool, is_active: bool):
             InlineKeyboardButton("👤 +4", callback_data=f"v:{event_id}:4"),
         ])
         rows.append([InlineKeyboardButton("❌ OUT", callback_data=f"v:{event_id}:out")])
-
-    if is_admin:
-        rows.append([
-            InlineKeyboardButton("🧑‍🤝‍🧑 Manage votes", callback_data=f"a:{event_id}:manage"),
-        ])
-        rows.append([
-            InlineKeyboardButton("⚙️ Capacity", callback_data=f"a:{event_id}:capacity"),
-            InlineKeyboardButton("🔒 Close", callback_data=f"a:{event_id}:close"),
-            InlineKeyboardButton("🗑 Delete", callback_data=f"a:{event_id}:delete"),
-        ])
 
     return InlineKeyboardMarkup(rows)
 
@@ -263,15 +254,10 @@ async def create_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         event_id = row["id"]
         text = await render_event(event_id)
         
-        # Determine if admin buttons should be shown
-        # Create a temporary event dict for the helper function
-        temp_event = {"created_by": update.message.from_user.id, "chat_id": update.message.chat.id}
-        is_admin = await should_show_admin_buttons(context, temp_event)
-
         await update.message.reply_text(
             text=text,
             parse_mode="Markdown",
-            reply_markup=vote_keyboard(event_id, is_admin, True),
+            reply_markup=vote_keyboard(event_id, True),
         )
         logger.info(f"Event created: {event_id} by user {update.message.from_user.id}")
     except Exception as e:
@@ -366,15 +352,12 @@ async def show_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Event with ID {event_id} not found.")
             return
         
-        # Check if user is admin (creator or group admin)
-        is_admin = await is_event_admin(context, ev, update.message.from_user.id)
-        
         text = await render_event(event_id)
         
         await update.message.reply_text(
             text=text,
             parse_mode="Markdown",
-            reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
+            reply_markup=vote_keyboard(event_id, ev["active"]),
         )
         
     except ValueError:
@@ -382,6 +365,228 @@ async def show_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error showing event: {e}")
         await update.message.reply_text("❌ Error showing event. Please try again.")
+
+
+# ---------- ADMIN COMMANDS ----------
+
+async def admin_capacity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set event capacity: /capacity <event_id> [new_capacity]"""
+    try:
+        if not context.args or len(context.args) < 1:
+            await update.message.reply_text(
+                "Usage: /capacity <event_id> [new_capacity]\n\n"
+                "Examples:\n"
+                "/capacity 1 20 - Set capacity to 20\n"
+                "/capacity 1 - Reply to this message with the new capacity"
+            )
+            return
+        
+        event_id = int(context.args[0])
+        ev = await db.fetchrow("select * from events where id=$1", event_id)
+        if not ev:
+            await update.message.reply_text(f"❌ Event with ID {event_id} not found.")
+            return
+        
+        # Check permissions
+        if not await is_event_admin(context, ev, update.message.from_user.id):
+            await update.message.reply_text("❌ Admins only")
+            return
+        
+        # If capacity provided as argument
+        if len(context.args) >= 2:
+            try:
+                new_max = int(context.args[1])
+                if new_max < 1:
+                    await update.message.reply_text("❌ Capacity must be at least 1.")
+                    return
+                
+                current_total = await db.fetchval(
+                    "select coalesce(sum(1 + guests),0) from votes where event_id=$1",
+                    event_id
+                )
+                
+                if new_max < current_total:
+                    await update.message.reply_text(
+                        f"❌ New capacity ({new_max}) is less than current attendees ({current_total}). "
+                        "Please remove some votes first."
+                    )
+                    return
+                
+                await db.execute(
+                    "update events set max_people=$1 where id=$2",
+                    new_max, event_id
+                )
+                
+                # Update group message
+                text = await render_event(event_id)
+                original_chat_id = ev["chat_id"]
+                try:
+                    await context.bot.send_message(
+                        chat_id=original_chat_id,
+                        text=text,
+                        parse_mode="Markdown",
+                        reply_markup=vote_keyboard(event_id, ev["active"]),
+                    )
+                except Exception as e:
+                    logger.error(f"Could not send message to group: {e}")
+                
+                await update.message.reply_text(f"✅ Capacity updated to {new_max}")
+                logger.info(f"Event {event_id} capacity updated to {new_max} by user {update.message.from_user.id}")
+            except ValueError:
+                await update.message.reply_text("❌ Capacity must be a number.")
+        else:
+            # Store state for reply
+            ADMIN_STATE[update.message.from_user.id] = {
+                "event_id": event_id,
+                "mode": "capacity",
+                "original_chat_id": ev["chat_id"]
+            }
+            await update.message.reply_text("📝 Reply with new max capacity (must be at least 1):")
+    
+    except ValueError:
+        await update.message.reply_text("❌ Event ID must be a number.")
+    except Exception as e:
+        logger.error(f"Error in admin_capacity: {e}", exc_info=True)
+        await update.message.reply_text("❌ Error updating capacity. Please try again.")
+
+
+async def admin_manage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manage votes: /manage <event_id>"""
+    try:
+        if not context.args or len(context.args) < 1:
+            await update.message.reply_text(
+                "Usage: /manage <event_id>\n\n"
+                "Example: /manage 1\n\n"
+                "Shows a list of users who voted, allowing you to edit their votes."
+            )
+            return
+        
+        event_id = int(context.args[0])
+        ev = await db.fetchrow("select * from events where id=$1", event_id)
+        if not ev:
+            await update.message.reply_text(f"❌ Event with ID {event_id} not found.")
+            return
+        
+        # Check permissions
+        if not await is_event_admin(context, ev, update.message.from_user.id):
+            await update.message.reply_text("❌ Admins only")
+            return
+        
+        votes = await db.fetch(
+            "select user_id, user_name from votes where event_id=$1",
+            event_id
+        )
+        
+        if not votes:
+            await update.message.reply_text("No votes to manage yet. Ask users to vote using the buttons first.")
+            return
+        
+        buttons = [
+            [InlineKeyboardButton(v["user_name"], callback_data=f"au:{event_id}:{v['user_id']}")]
+            for v in votes
+        ]
+        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="au:cancel")])
+        
+        # Store original message info
+        ADMIN_STATE[update.message.from_user.id] = {
+            "event_id": event_id,
+            "original_chat_id": ev["chat_id"],
+            "original_message_id": None
+        }
+        
+        await update.message.reply_text(
+            f"Select user to edit for event *{ev['title']}*:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        logger.info(f"Admin manage menu shown for event {event_id}")
+    
+    except ValueError:
+        await update.message.reply_text("❌ Event ID must be a number.")
+    except Exception as e:
+        logger.error(f"Error in admin_manage_cmd: {e}", exc_info=True)
+        await update.message.reply_text("❌ Error. Please try again.")
+
+
+async def admin_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Close event: /close <event_id>"""
+    try:
+        if not context.args or len(context.args) < 1:
+            await update.message.reply_text(
+                "Usage: /close <event_id>\n\n"
+                "Example: /close 1\n\n"
+                "Closes voting for the event."
+            )
+            return
+        
+        event_id = int(context.args[0])
+        ev = await db.fetchrow("select * from events where id=$1", event_id)
+        if not ev:
+            await update.message.reply_text(f"❌ Event with ID {event_id} not found.")
+            return
+        
+        # Check permissions
+        if not await is_event_admin(context, ev, update.message.from_user.id):
+            await update.message.reply_text("❌ Admins only")
+            return
+        
+        await db.execute("update events set active=false where id=$1", event_id)
+        text = await render_event(event_id)
+        
+        # Update group message
+        original_chat_id = ev["chat_id"]
+        try:
+            await context.bot.send_message(
+                chat_id=original_chat_id,
+                text=text,
+                parse_mode="Markdown",
+                reply_markup=vote_keyboard(event_id, False),
+            )
+            logger.info(f"Event {event_id} closed and message sent to group {original_chat_id}")
+        except Exception as e:
+            logger.error(f"Could not send message to group: {e}")
+        
+        await update.message.reply_text("✅ Event closed")
+        logger.info(f"Event {event_id} closed by user {update.message.from_user.id}")
+    
+    except ValueError:
+        await update.message.reply_text("❌ Event ID must be a number.")
+    except Exception as e:
+        logger.error(f"Error in admin_close: {e}", exc_info=True)
+        await update.message.reply_text("❌ Error closing event. Please try again.")
+
+
+async def admin_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete event: /delete <event_id>"""
+    try:
+        if not context.args or len(context.args) < 1:
+            await update.message.reply_text(
+                "Usage: /delete <event_id>\n\n"
+                "Example: /delete 1\n\n"
+                "⚠️ This permanently deletes the event and all votes."
+            )
+            return
+        
+        event_id = int(context.args[0])
+        ev = await db.fetchrow("select * from events where id=$1", event_id)
+        if not ev:
+            await update.message.reply_text(f"❌ Event with ID {event_id} not found.")
+            return
+        
+        # Check permissions
+        if not await is_event_admin(context, ev, update.message.from_user.id):
+            await update.message.reply_text("❌ Admins only")
+            return
+        
+        await db.execute("delete from events where id=$1", event_id)
+        await update.message.reply_text(f"🗑 Event '{ev['title']}' deleted")
+        logger.info(f"Event {event_id} deleted by user {update.message.from_user.id}")
+    
+    except ValueError:
+        await update.message.reply_text("❌ Event ID must be a number.")
+    except Exception as e:
+        logger.error(f"Error in admin_delete: {e}", exc_info=True)
+        await update.message.reply_text("❌ Error deleting event. Please try again.")
 
 
 # ---------- VOTING ----------
@@ -457,14 +662,8 @@ async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not vote_changed:
             return
 
-        # Check if event creator is a group admin (not just the creator)
-        # This ensures admin buttons are only visible when appropriate
-        # Note: In Telegram, all users see the same keyboard, so we show buttons
-        # only if the creator is a group admin (who can actually use them)
-        is_admin = await should_show_admin_buttons(context, ev)
-
         text = await render_event(event_id)
-        new_keyboard = vote_keyboard(event_id, is_admin, ev["active"])
+        new_keyboard = vote_keyboard(event_id, ev["active"])
         
         try:
             await q.edit_message_text(
@@ -589,8 +788,6 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif action == "close":
                 await db.execute("update events set active=false where id=$1", event_id)
                 text = await render_event(event_id)
-                # Check if event creator is a group admin (same logic as vote updates)
-                is_admin = await should_show_admin_buttons(context, ev)
                 
                 # Update the original event message in the group
                 # Use event's chat_id (where the event was created)
@@ -605,7 +802,7 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             message_id=original_message_id,
                             text=text,
                             parse_mode="Markdown",
-                            reply_markup=vote_keyboard(event_id, is_admin, False),
+                            reply_markup=vote_keyboard(event_id, False),
                         )
                         logger.info(f"Event {event_id} closed and message updated in group {original_chat_id}")
                     except Exception as e:
@@ -616,7 +813,7 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 chat_id=original_chat_id,
                                 text=text,
                                 parse_mode="Markdown",
-                                reply_markup=vote_keyboard(event_id, is_admin, False),
+                                reply_markup=vote_keyboard(event_id, False),
                             )
                             logger.info(f"Sent new event message to group {original_chat_id} for closed event {event_id}")
                         except Exception as e2:
@@ -628,7 +825,7 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             chat_id=original_chat_id,
                             text=text,
                             parse_mode="Markdown",
-                            reply_markup=vote_keyboard(event_id, is_admin, False),
+                            reply_markup=vote_keyboard(event_id, False),
                         )
                         logger.info(f"Sent new event message to group {original_chat_id} for closed event {event_id} (no message_id available)")
                     except Exception as e:
@@ -797,8 +994,6 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
             text = await render_event(event_id)
-            # Check if event creator is a group admin (same logic as vote updates)
-            is_admin = await should_show_admin_buttons(context, ev)
             
             # Get original message info from state
             original_chat_id = state.get("original_chat_id")
@@ -813,7 +1008,7 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await q.edit_message_text(
                     text=text,
                     parse_mode="Markdown",
-                    reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
+                    reply_markup=vote_keyboard(event_id, ev["active"]),
                 )
             except Exception as e:
                 logger.error(f"Could not edit private message: {e}")
@@ -827,7 +1022,7 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             message_id=original_message_id,
                             text=text,
                             parse_mode="Markdown",
-                            reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
+                            reply_markup=vote_keyboard(event_id, ev["active"]),
                         )
                         logger.info(f"Updated event message in group {original_chat_id} after vote edit for event {event_id}")
                     except Exception as e:
@@ -838,7 +1033,7 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 chat_id=original_chat_id,
                                 text=text,
                                 parse_mode="Markdown",
-                                reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
+                                reply_markup=vote_keyboard(event_id, ev["active"]),
                             )
                             logger.info(f"Sent new event message to group {original_chat_id} after vote edit for event {event_id}")
                         except Exception as e2:
@@ -850,7 +1045,7 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             chat_id=original_chat_id,
                             text=text,
                             parse_mode="Markdown",
-                            reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
+                            reply_markup=vote_keyboard(event_id, ev["active"]),
                         )
                         logger.info(f"Sent new event message to group {original_chat_id} after vote edit for event {event_id} (no message_id)")
                     except Exception as e:
@@ -928,8 +1123,6 @@ async def handle_capacity_update(update: Update, context: ContextTypes.DEFAULT_T
         ev = await db.fetchrow("select * from events where id=$1", event_id)
         if ev:
             text = await render_event(event_id)
-            # Check if event creator is a group admin (same logic as vote updates)
-            is_admin = await should_show_admin_buttons(context, ev)
             
             # Update the original event message in the group
             # Use event's chat_id if we don't have it stored
@@ -945,7 +1138,7 @@ async def handle_capacity_update(update: Update, context: ContextTypes.DEFAULT_T
                             message_id=original_message_id,
                             text=text,
                             parse_mode="Markdown",
-                            reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
+                            reply_markup=vote_keyboard(event_id, ev["active"]),
                         )
                         logger.info(f"Updated event message in group {original_chat_id} for event {event_id}")
                     except Exception as e:
@@ -956,7 +1149,7 @@ async def handle_capacity_update(update: Update, context: ContextTypes.DEFAULT_T
                                 chat_id=original_chat_id,
                                 text=text,
                                 parse_mode="Markdown",
-                                reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
+                                reply_markup=vote_keyboard(event_id, ev["active"]),
                             )
                             logger.info(f"Sent new event message to group {original_chat_id} for event {event_id}")
                         except Exception as e2:
@@ -968,7 +1161,7 @@ async def handle_capacity_update(update: Update, context: ContextTypes.DEFAULT_T
                             chat_id=original_chat_id,
                             text=text,
                             parse_mode="Markdown",
-                            reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
+                            reply_markup=vote_keyboard(event_id, ev["active"]),
                         )
                         logger.info(f"Sent new event message to group {original_chat_id} for event {event_id} (no message_id available)")
                     except Exception as e:
@@ -1159,6 +1352,11 @@ async def init_telegram_app():
     telegram_app.add_handler(CommandHandler("events", list_events))  # Alias for /list
     telegram_app.add_handler(CommandHandler("show", show_event))
     telegram_app.add_handler(CommandHandler("cancel", cancel_admin_action))
+    # Admin commands
+    telegram_app.add_handler(CommandHandler("capacity", admin_capacity))
+    telegram_app.add_handler(CommandHandler("manage", admin_manage_cmd))
+    telegram_app.add_handler(CommandHandler("close", admin_close))
+    telegram_app.add_handler(CommandHandler("delete", admin_delete))
     telegram_app.add_handler(CallbackQueryHandler(on_vote, pattern="^v:"))
     telegram_app.add_handler(CallbackQueryHandler(on_admin, pattern="^(a:|au:|av:)"))
     telegram_app.add_handler(InlineQueryHandler(inline_events))
