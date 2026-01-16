@@ -1356,7 +1356,7 @@ async def inline_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         input_message_content=InputTextMessageContent(
                             message_text=text, parse_mode="Markdown"
                         ),
-                        reply_markup=vote_keyboard(ev["id"], False, ev["active"]),
+                        reply_markup=vote_keyboard(ev["id"], ev["active"]),
                     )
                 )
             except Exception as e:
@@ -1381,7 +1381,13 @@ async def inline_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await iq.answer(results, cache_time=1, is_personal=True)
     except Exception as e:
         logger.error(f"Error in inline query: {e}", exc_info=True)
-        await iq.answer([])
+        # Try to answer with empty list, but handle "query too old" errors gracefully
+        try:
+            await iq.answer([], cache_time=1, is_personal=True)
+        except Exception as answer_error:
+            # Query might be too old or invalid - that's okay, just log it
+            if "too old" not in str(answer_error).lower() and "invalid" not in str(answer_error).lower():
+                logger.warning(f"Error answering inline query: {answer_error}")
 
 
 # ---------- FLASK WEBHOOK ROUTES ----------
