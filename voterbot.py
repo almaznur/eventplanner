@@ -431,12 +431,22 @@ async def admin_capacity(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Update group message - try to find and update original message
                 text = await render_event(event_id)
                 original_chat_id = ev["chat_id"]
+                logger.info(f"Updating group message for event {event_id} in chat {original_chat_id}")
                 
-                # Try to get message_id from database if stored
-                message_id = await db.fetchval(
-                    "select message_id from events where id=$1",
-                    event_id
-                )
+                # Try to get message_id from database if stored (column may not exist yet)
+                message_id = None
+                try:
+                    message_id = await db.fetchval(
+                        "select message_id from events where id=$1",
+                        event_id
+                    )
+                    if message_id:
+                        logger.info(f"Found message_id={message_id} for event {event_id}")
+                    else:
+                        logger.info(f"No message_id stored for event {event_id}, will send new message")
+                except Exception as db_error:
+                    # Column doesn't exist yet, that's okay - we'll send a new message
+                    logger.debug(f"Could not get message_id (column may not exist): {db_error}")
                 
                 if message_id:
                     # Try to edit the original message
@@ -459,16 +469,21 @@ async def admin_capacity(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 parse_mode="Markdown",
                                 reply_markup=vote_keyboard(event_id, ev["active"]),
                             )
-                            # Update database with new message_id
-                            await db.execute(
-                                "update events set message_id=$1 where id=$2",
-                                sent_msg.message_id, event_id
-                            )
+                            # Try to update database with new message_id
+                            try:
+                                await db.execute(
+                                    "update events set message_id=$1 where id=$2",
+                                    sent_msg.message_id, event_id
+                                )
+                            except Exception:
+                                # Column doesn't exist, that's okay
+                                pass
                             logger.info(f"Sent new event message to group {original_chat_id} for event {event_id}")
                         except Exception as e2:
                             logger.error(f"Could not send message to group: {e2}")
                 else:
-                    # No message_id stored, send new message and store it
+                    # No message_id stored, send new message to group
+                    logger.info(f"No message_id found, sending new message to group {original_chat_id} for event {event_id}")
                     try:
                         sent_msg = await context.bot.send_message(
                             chat_id=original_chat_id,
@@ -476,14 +491,20 @@ async def admin_capacity(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             parse_mode="Markdown",
                             reply_markup=vote_keyboard(event_id, ev["active"]),
                         )
-                        # Store message_id for future updates
-                        await db.execute(
-                            "update events set message_id=$1 where id=$2",
-                            sent_msg.message_id, event_id
-                        )
-                        logger.info(f"Sent new event message to group {original_chat_id} for event {event_id} and stored message_id")
+                        logger.info(f"Successfully sent message to group {original_chat_id}, message_id={sent_msg.message_id}")
+                        # Try to store message_id for future updates (column may not exist)
+                        try:
+                            await db.execute(
+                                "update events set message_id=$1 where id=$2",
+                                sent_msg.message_id, event_id
+                            )
+                            logger.info(f"Stored message_id={sent_msg.message_id} for event {event_id}")
+                        except Exception as db_error:
+                            # Column doesn't exist, that's okay
+                            logger.debug(f"Could not store message_id (column may not exist): {db_error}")
+                        logger.info(f"Sent new event message to group {original_chat_id} for event {event_id}")
                     except Exception as e:
-                        logger.error(f"Could not send message to group: {e}")
+                        logger.error(f"Could not send message to group {original_chat_id}: {e}", exc_info=True)
                 
                 await update.message.reply_text(f"✅ Capacity updated to {new_max}")
                 logger.info(f"Event {event_id} capacity updated to {new_max} by user {update.message.from_user.id}")
