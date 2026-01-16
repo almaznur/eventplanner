@@ -14,6 +14,7 @@ from telegram import (
     InlineQueryResultArticle,
     InputTextMessageContent,
 )
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -413,12 +414,19 @@ async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
             event_id
         )
 
+        vote_changed = False
+        
         if value == "out":
             if existing:
                 await db.execute(
                     "delete from votes where event_id=$1 and user_id=$2",
                     event_id, user.id
                 )
+                vote_changed = True
+            else:
+                # No existing vote, nothing to remove
+                await safe_answer_callback(q, "You're not in the list", show_alert=True)
+                return
         else:
             guests = int(value)
             new_size = 1 + guests
@@ -426,6 +434,12 @@ async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if current_total - old_size + new_size > ev["max_people"]:
                 await safe_answer_callback(q, "❌ Capacity exceeded", show_alert=True)
+                return
+
+            # Check if this is actually a change
+            if existing and existing["guests"] == guests:
+                # Same vote, no change needed
+                await safe_answer_callback(q, "You already have this vote", show_alert=True)
                 return
 
             await db.execute(
@@ -437,6 +451,11 @@ async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 """,
                 event_id, user.id, user.full_name, guests
             )
+            vote_changed = True
+
+        # Only update message if vote actually changed
+        if not vote_changed:
+            return
 
         # Check if event creator is a group admin (not just the creator)
         # This ensures admin buttons are only visible when appropriate
@@ -445,11 +464,25 @@ async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_admin = await should_show_admin_buttons(context, ev)
 
         text = await render_event(event_id)
-        await q.edit_message_text(
-            text=text,
-            parse_mode="Markdown",
-            reply_markup=vote_keyboard(event_id, is_admin, ev["active"]),
-        )
+        new_keyboard = vote_keyboard(event_id, is_admin, ev["active"])
+        
+        try:
+            await q.edit_message_text(
+                text=text,
+                parse_mode="Markdown",
+                reply_markup=new_keyboard,
+            )
+        except BadRequest as edit_error:
+            # Handle "Message is not modified" error gracefully
+            error_msg = str(edit_error).lower()
+            if "not modified" in error_msg or "message is not modified" in error_msg:
+                logger.debug(f"Message not modified (no change in content) for event {event_id} - this is normal")
+                # Message is already up to date, that's fine - callback was already answered at the start
+                return
+            else:
+                # Re-raise other BadRequest errors
+                logger.error(f"BadRequest error editing message: {edit_error}")
+                raise
     except ValueError as e:
         logger.error(f"Error parsing vote callback: {e}")
         await safe_answer_callback(q, "❌ Invalid vote", show_alert=True)
