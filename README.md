@@ -47,8 +47,6 @@ After creating an event, use the inline buttons to vote:
 - **✅ IN** - You're attending
 - **👤 +1** - You + 1 guest
 - **👤 +2** - You + 2 guests
-- **👤 +3** - You + 3 guests
-- **👤 +4** - You + 4 guests
 - **❌ OUT** - Remove your vote
 
 ## Inline Queries

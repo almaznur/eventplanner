@@ -164,8 +164,6 @@ def vote_keyboard(event_id: int, is_active: bool):
         rows.append([
             InlineKeyboardButton("👤 +1", callback_data=f"v:{event_id}:1"),
             InlineKeyboardButton("👤 +2", callback_data=f"v:{event_id}:2"),
-            InlineKeyboardButton("👤 +3", callback_data=f"v:{event_id}:3"),
-            InlineKeyboardButton("👤 +4", callback_data=f"v:{event_id}:4"),
         ])
         rows.append([InlineKeyboardButton("❌ OUT", callback_data=f"v:{event_id}:out")])
 
@@ -759,6 +757,9 @@ async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
         else:
             guests = int(value)
+            if guests not in (0, 1, 2):
+                await safe_answer_callback(q, "❌ That option is no longer available", show_alert=True)
+                return
             new_size = 1 + guests
             old_size = 1 + existing["guests"] if existing else 0
 
@@ -1056,10 +1057,6 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     InlineKeyboardButton("👤 +1", callback_data="av:1"),
                     InlineKeyboardButton("👤 +2", callback_data="av:2"),
                 ],
-                [
-                    InlineKeyboardButton("👤 +3", callback_data="av:3"),
-                    InlineKeyboardButton("👤 +4", callback_data="av:4"),
-                ],
                 [InlineKeyboardButton("❌ OUT", callback_data="av:out")],
                 [InlineKeyboardButton("❌ Cancel", callback_data="au:cancel")],
             ]
@@ -1113,6 +1110,9 @@ async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             else:
                 guests = int(value)
+                if guests not in (0, 1, 2):
+                    await safe_answer_callback(q, "❌ That option is no longer available", show_alert=True)
+                    return
                 await db.execute(
                     "update votes set guests=$3, updated_at=now() where event_id=$1 and user_id=$2",
                     event_id, target_user_id, guests
